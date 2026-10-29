@@ -405,7 +405,12 @@
 #define FILE_NAME "AM32_SITL_CAN"
 #define DRONECAN_SUPPORT 1
 #define DRONECAN_NODE_NAME "org.am32.sitl"
+#ifdef SIM_DEAD_TIME
+// ramp study: match a real target's dead time (SITL TIM1 = 160 MHz)
+#define DEAD_TIME SIM_DEAD_TIME
+#else
 #define DEAD_TIME 80
+#endif
 #define HARDWARE_GROUP_SITL_A
 #define TARGET_STALL_PROTECTION_INTERVAL 20000
 #define TARGET_VOLTAGE_DIVIDER 110
@@ -1485,6 +1490,17 @@
 #define HARDWARE_GROUP_AT_B
 #define HARDWARE_GROUP_AT_504
 #define USE_SERIAL_TELEMETRY
+#endif
+
+#ifdef FOXEER_F421_PROFILE
+// Hakea bench test build: FOXEER_F421 plus the throttle sine programme (Src/hakea_profile.c)
+#define HARDWARE_GROUP_AT_C
+#define FIRMWARE_NAME "FOXEER F4   "
+#define FILE_NAME "FOXEER_F421_PROFILE"
+#define DEAD_TIME 35
+#define HARDWARE_GROUP_AT_540
+#define USE_SERIAL_TELEMETRY
+#define HAKEA_PROFILE
 #endif
 
 #ifdef FOXEER_F421

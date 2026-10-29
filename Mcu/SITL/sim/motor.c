@@ -314,6 +314,158 @@ static void plog_push(const char* line)
     atomic_store_explicit(&plog.head, head + 1, memory_order_release);
 }
 
+/*
+  ---- Hakea ramp study log ----
+
+  AM32_SITL_STUDY_LOG=<file> writes one CSV line per
+  AM32_SITL_STUDY_DT_NS (default 50000 = 20 kHz) of SIMULATED time,
+  averaged over the interval where it says so. Written through a ring
+  and a logger thread (like the physics log) so disk latency never
+  stalls the physics; the run end (sitl_study_end) drains the ring and
+  exits. Columns:
+    t        s, sim time at the end of the interval
+    rpm      mechanical rpm at the end of the interval
+    vbus     V, mean bus voltage
+    ibus     A, mean battery current (negative = regen)
+    irms     A, rms phase current over the interval
+    tau      Nm, mean electromagnetic torque
+    duty     firmware duty_cycle (0..2000, after the ramp limiter)
+    adj      firmware adjusted_duty_cycle (timer compare)
+    arr      firmware tim1_arr (PWM period in timer ticks)
+    input    firmware input (throttle 0..2047)
+    wave     last DShot value sent by the wave generator
+    desync   firmware desync_happened counter
+    running  firmware running flag
+    step     firmware commutation step (1..6)
+    thetae   rotor electrical angle, deg [0,360)
+    ci       firmware commutation_interval (us)
+    pcu      W, mean copper loss (sum i^2 R) over the interval
+    pbr      W, mean bridge loss (fet + diode) over the interval
+ */
+#define STUDY_LINE_MAX 256
+#define STUDY_RING 65536
+static struct {
+    char (*lines)[STUDY_LINE_MAX];
+    _Atomic unsigned head, tail, dropped;
+    bool enabled, checked;
+    FILE* f;
+    pthread_t thread;
+    uint64_t dt_ns, next_ns;
+    double acc_v, acc_i, acc_i2, acc_tau;
+    double e_cu0, e_br0;
+    uint32_t acc_n;
+} study;
+
+static void* study_thread(void* arg)
+{
+    (void)arg;
+    for (;;) {
+        unsigned tail = atomic_load_explicit(&study.tail, memory_order_relaxed);
+        const unsigned head = atomic_load_explicit(&study.head, memory_order_acquire);
+        while (tail != head) {
+            fputs(study.lines[tail % STUDY_RING], study.f);
+            tail++;
+            atomic_store_explicit(&study.tail, tail, memory_order_release);
+        }
+        usleep(5000);
+    }
+    return NULL;
+}
+
+static void study_init(void)
+{
+    study.checked = true;
+    const char* fn = getenv("AM32_SITL_STUDY_LOG");
+    if (fn == NULL || fn[0] == 0) {
+        return;
+    }
+    study.f = fopen(fn, "w");
+    study.lines = malloc(sizeof(*study.lines) * STUDY_RING);
+    if (!study.f || !study.lines) {
+        fprintf(stderr, "SITL: cannot open study log %s\n", fn);
+        return;
+    }
+    const char* dts = getenv("AM32_SITL_STUDY_DT_NS");
+    study.dt_ns = dts ? strtoull(dts, NULL, 10) : 50000;
+    fputs("t,rpm,vbus,ibus,irms,tau,duty,adj,arr,input,wave,desync,running,step,thetae,ci,pcu,pbr,mod,ibus_inst\n", study.f);
+    study.enabled = true;
+    pthread_create(&study.thread, NULL, study_thread, NULL);
+}
+
+void sitl_study_end(const char* why)
+{
+    fprintf(stderr, "SITL: study run end: %s at t=%.6f\n", why, sitl_time_ns() * 1e-9);
+    if (study.enabled) {
+        // let the logger thread drain the ring (bounded wait)
+        for (int k = 0; k < 400; k++) {
+            if (atomic_load(&study.tail) == atomic_load(&study.head)) {
+                break;
+            }
+            usleep(5000);
+        }
+        fprintf(study.f, "# end,%s,%.6f,dropped=%u\n", why, sitl_time_ns() * 1e-9,
+                atomic_load(&study.dropped));
+        fflush(study.f);
+    }
+    fflush(NULL);
+    _exit(0);
+}
+
+static void study_step(uint64_t now_ns, double dt, double tau)
+{
+    if (!study.checked) {
+        study_init();
+    }
+    if (!study.enabled) {
+        return;
+    }
+    study.acc_v += m.vbus;
+    study.acc_i += m.ibus;
+    study.acc_i2 += (m.i[0] * m.i[0] + m.i[1] * m.i[1] + m.i[2] * m.i[2]) / 3.0;
+    study.acc_tau += tau;
+    study.acc_n++;
+    (void)dt;
+    if (now_ns < study.next_ns) {
+        return;
+    }
+    const double interval = study.next_ns ? (double)study.dt_ns * 1e-9 : 0.0;
+    study.next_ns = now_ns + study.dt_ns;
+    extern volatile uint16_t duty_cycle;
+    extern uint16_t adjusted_duty_cycle, tim1_arr, input;
+    extern uint32_t desync_happened;
+    extern uint8_t running;
+    extern char step;
+    extern volatile uint32_t commutation_interval;
+    extern uint16_t sitl_wave_current;
+    extern volatile int16_t sim_profile_out __attribute__((weak));
+    const int mod = (&sim_profile_out != NULL) ? sim_profile_out : 0;
+    const double n = study.acc_n ? study.acc_n : 1;
+    double the = fmod(m.theta * (sitl_cfg.motor.poles / 2), TWO_PI) * 360.0 / TWO_PI;
+    if (the < 0) {
+        the += 360;
+    }
+    const double pcu = interval > 0 ? (m.e_cu - study.e_cu0) / interval : 0;
+    const double pbr = interval > 0 ? (m.e_br - study.e_br0) / interval : 0;
+    study.e_cu0 = m.e_cu;
+    study.e_br0 = m.e_br;
+    const unsigned head = atomic_load_explicit(&study.head, memory_order_relaxed);
+    const unsigned tail = atomic_load_explicit(&study.tail, memory_order_acquire);
+    if (head - tail >= STUDY_RING) {
+        atomic_fetch_add_explicit(&study.dropped, 1, memory_order_relaxed);
+    } else {
+        snprintf(study.lines[head % STUDY_RING], STUDY_LINE_MAX,
+            "%.6f,%.1f,%.3f,%.3f,%.3f,%.5f,%u,%u,%u,%u,%u,%u,%u,%d,%.1f,%u,%.2f,%.2f,%d,%.3f\n",
+            now_ns * 1e-9, m.omega * 60.0 / TWO_PI, study.acc_v / n, study.acc_i / n,
+            sqrt(study.acc_i2 / n), study.acc_tau / n,
+            (unsigned)duty_cycle, (unsigned)adjusted_duty_cycle, (unsigned)tim1_arr,
+            (unsigned)input, (unsigned)sitl_wave_current, (unsigned)desync_happened,
+            (unsigned)running, (int)step, the, (unsigned)commutation_interval, pcu, pbr, mod, m.ibus);
+        atomic_store_explicit(&study.head, head + 1, memory_order_release);
+    }
+    study.acc_v = study.acc_i = study.acc_i2 = study.acc_tau = 0;
+    study.acc_n = 0;
+}
+
 void motor_step(uint64_t now_ns, uint32_t dt_ns)
 {
     const double dt = dt_ns * 1e-9;
@@ -922,6 +1074,8 @@ void motor_step(uint64_t now_ns, uint32_t dt_ns)
             plog_push(line);
         }
     }
+
+    study_step(now_ns, dt, m.tau);
 
     // sensor averaging, snapshot every 64 steps
     m.acc_v += m.vbus;

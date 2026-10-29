@@ -583,6 +583,10 @@ void sitl_reset_with_cause(const char* cause)
     pthread_sigmask(SIG_BLOCK, &set, NULL);
 #endif
     fprintf(stderr, "SITL: reset (%s) at t=%.3fs\n", cause, sim_time_ns_v * 1.0e-9);
+    if (getenv("AM32_SITL_WAVE") != NULL) {
+        // ramp study: a reset ends the run (the wave would restart)
+        sitl_study_end(cause);
+    }
     if (sitl_cfg.exit_on_reset) {
         // Cygwin GDB cannot follow the replacement process made by execv.
         // End this debugging run explicitly, retaining real firmware resets.
@@ -631,6 +635,7 @@ static void sim_step_once(void)
     sim_time_ns_v += dt;
     sitl_timers_step(sim_time_ns_v);
     sitl_state_step(sim_time_ns_v);
+    sitl_wave_step(sim_time_ns_v);
 
     // UDP polling belongs to time itself, not to the main loop: a tune
     // played from an interrupt handler advances whole tenths of a

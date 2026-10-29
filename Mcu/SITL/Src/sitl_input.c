@@ -359,3 +359,144 @@ void sitl_input_stats(uint32_t out[4])
     out[2] = stats.replies;
     out[3] = stats.bad_gcr;
 }
+
+/*
+  ---- Hakea ramp study: deterministic DShot waveform generator ----
+
+  AM32_SITL_WAVE=<file> replays a pre-computed list of DShot frames at a
+  fixed period of SIMULATED time, generated inside the sim thread (no
+  UDP, so the stimulus timing cannot depend on the host). File format,
+  little endian:
+    char magic[4] = "HKW1"
+    u32  period_ns    frame period (simulated time)
+    u8   type         1=DSHOT150 2=DSHOT300 3=DSHOT600
+    u8   bidir        1 = inverted (bidirectional) DShot, idle high
+    u16  reserved
+    u32  n            number of frames
+    u16  value[n]     11 bit throttle value (0, 1..47 commands, 48..2047)
+  Frame k starts at sim time k*period_ns. After the last frame the run
+  ends: the process exits (AM32_SITL_WAVE_EXIT, default on) so a study
+  driver can simply wait for it.
+ */
+static uint16_t* wave_val;
+static uint32_t wave_n, wave_period_ns, wave_k;
+static uint8_t wave_type = SITL_INPUT_DSHOT300, wave_bidir;
+static bool wave_on;
+
+extern void sitl_study_end(const char* why);
+
+uint16_t sitl_wave_current = 0; // last frame value sent, for the study log
+
+static uint16_t wave_frame(uint16_t value11, bool bidir)
+{
+    const uint16_t v = (uint16_t)(((value11 & 0x7FF) << 1));
+    uint16_t csum = (v ^ (v >> 4) ^ (v >> 8));
+    if (bidir) {
+        csum = ~csum;
+    }
+    return (uint16_t)((v << 4) | (csum & 0xF));
+}
+
+void sitl_wave_init(void)
+{
+    const char* fn = getenv("AM32_SITL_WAVE");
+    if (fn == NULL || fn[0] == 0) {
+        return;
+    }
+    FILE* f = fopen(fn, "rb");
+    if (!f) {
+        perror("SITL: wave file");
+        exit(1);
+    }
+    char magic[4];
+    uint16_t reserved;
+    if (fread(magic, 1, 4, f) != 4 || memcmp(magic, "HKW1", 4) != 0
+        || fread(&wave_period_ns, 4, 1, f) != 1 || fread(&wave_type, 1, 1, f) != 1
+        || fread(&wave_bidir, 1, 1, f) != 1 || fread(&reserved, 2, 1, f) != 1
+        || fread(&wave_n, 4, 1, f) != 1) {
+        fprintf(stderr, "SITL: bad wave file %s\n", fn);
+        exit(1);
+    }
+    wave_val = malloc(sizeof(uint16_t) * (wave_n + 1));
+    if (!wave_val || fread(wave_val, 2, wave_n, f) != wave_n) {
+        fprintf(stderr, "SITL: short wave file %s\n", fn);
+        exit(1);
+    }
+    fclose(f);
+    wave_on = true;
+    wave_k = 0;
+    {
+        // AM32_SITL_PROGRAMME="f:amp:ms,f:amp:ms,...": replace the Hakea
+        // PROFILE programme (study build with -DSIM_STUDY_PROGRAMME only)
+        extern void hakea_profile_study_set(const uint16_t*, int) __attribute__((weak));
+        const char* pg = getenv("AM32_SITL_PROGRAMME");
+        if (pg != NULL && pg[0] != 0) {
+            uint16_t v[96];
+            int n = 0;
+            const char* c = pg;
+            while (n < 32) {
+                unsigned f, a, ms;
+                int used = 0;
+                if (sscanf(c, "%u:%u:%u%n", &f, &a, &ms, &used) != 3) {
+                    break;
+                }
+                v[3 * n] = (uint16_t)f;
+                v[3 * n + 1] = (uint16_t)a;
+                v[3 * n + 2] = (uint16_t)ms;
+                n++;
+                c += used;
+                if (*c != ',') {
+                    break;
+                }
+                c++;
+            }
+            if (hakea_profile_study_set == NULL || n == 0) {
+                fprintf(stderr, "SITL: AM32_SITL_PROGRAMME needs a -DHAKEA_PROFILE -DSIM_STUDY_PROGRAMME build\n");
+                exit(1);
+            }
+            hakea_profile_study_set(v, n);
+            fprintf(stderr, "SITL: Hakea programme replaced, %d steps\n", n);
+        }
+    }
+    fprintf(stderr, "SITL: wave %s: %u frames every %u ns (%.3f s), type %u bidir %u\n",
+            fn, wave_n, wave_period_ns, wave_n * (double)wave_period_ns * 1e-9,
+            wave_type, wave_bidir);
+}
+
+// sim thread, every physics step
+void sitl_wave_step(uint64_t now_ns)
+{
+    if (!wave_on) {
+        return;
+    }
+    // complete a pending BDShot reply transmit at its exact time
+    if (out_put && tx_done_ns != 0 && now_ns >= tx_done_ns) {
+        tx_done_ns = 0;
+        sitl_irq_pend(SITL_IRQ_DMA);
+        return;
+    }
+    if (now_ns < (uint64_t)wave_k * wave_period_ns) {
+        return;
+    }
+    if (wave_k >= wave_n) {
+        wave_on = false;
+        sitl_study_end("wave finished");
+        return;
+    }
+    const uint16_t value = wave_val[wave_k++];
+    sitl_wave_current = value;
+    have_sender = false; // replies are not sent anywhere
+    last_type = wave_type;
+    pin_floating = false;
+    pin_idle_level = wave_bidir ? 1 : 0;
+    stats.frames++;
+    if (!cap_armed || out_put) {
+        stats.dropped++;
+        return;
+    }
+    synth_frame(wave_type, wave_frame(value, wave_bidir != 0));
+    if (cap_index >= cap_count) {
+        cap_armed = false;
+        sitl_irq_pend(SITL_IRQ_DMA);
+    }
+}

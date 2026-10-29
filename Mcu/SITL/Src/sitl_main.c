@@ -173,6 +173,7 @@ int main(int argc, char** argv)
         sitl_cfg.eeprom_path, sitl_cfg.can_uri, (double)sitl_cfg.speedup);
 
     sitl_input_init();
+    sitl_wave_init();
     sitl_state_init();
     if (sitl_cfg.wait_for_input) {
         sitl_input_wait();

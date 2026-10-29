@@ -49,6 +49,9 @@ CFLAGS_BASE := -fsingle-precision-constant -fomit-frame-pointer -ffast-math
 CFLAGS_BASE += -I$(MAIN_INC_DIR) -g3 -O3 -ffunction-sections --specs=nosys.specs
 CFLAGS_BASE += -Wall -Wundef -Wextra -Werror -Wno-unused-parameter -Wno-stringop-truncation
 
+# ramp study: extra defines, e.g. make SIM_CFLAGS=-DSIM_RAMP_HIGH_OVERRIDE=64
+CFLAGS_BASE += $(SIM_CFLAGS)
+
 CFLAGS_COMMON := $(CFLAGS_BASE)
 
 # Linker options

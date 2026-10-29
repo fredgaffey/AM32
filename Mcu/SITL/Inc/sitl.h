@@ -39,6 +39,10 @@ void sitl_input_send_reply(void); // sendDshotDma()
 void sitl_input_dma_irq(void); // DMA transfer complete handler
 uint8_t sitl_input_pin_state(void); // getInputPinState()
 void sitl_input_stats(uint32_t out[4]);
+// hakea ramp study: deterministic DShot waveform + study log
+void sitl_wave_init(void);
+void sitl_wave_step(uint64_t now_ns);
+void sitl_study_end(const char* why);
 
 // simulation state streaming + runtime model control (sitl_state.c)
 void sitl_state_init(void);

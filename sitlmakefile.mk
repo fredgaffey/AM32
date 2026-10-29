@@ -74,7 +74,7 @@ endif
 # -funsigned-char matches the ARM targets, where char is unsigned
 CFLAGS_COMMON_$(MCU) := $(SITL_GCC_FLAGS) -funsigned-char -iquote $(MAIN_INC_DIR) -g3 -O2 \
 	-Wall -Wundef -Wextra -Werror -Wno-unused-parameter \
-	-fno-strict-aliasing -pthread $(SITL_SAN_FLAGS) $(SITL_COV_FLAGS)
+	-fno-strict-aliasing -pthread $(SITL_SAN_FLAGS) $(SITL_COV_FLAGS) $(SIM_CFLAGS)
 
 LDFLAGS_COMMON_$(MCU) := -pthread $(SITL_SAN_FLAGS) $(SITL_COV_FLAGS)
 

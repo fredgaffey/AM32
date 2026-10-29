@@ -230,6 +230,7 @@ an settings option)
 #include "signal.h"
 #include "sounds.h"
 #include "targets.h"
+#include "hakea_profile.h"
 #include <stdint.h>
 #include <string.h>
 #include <assert.h>
@@ -785,6 +786,11 @@ void loadEEpromSettings()
             max_ramp_high_rpm = eepromBuffer.max_ramp / 10;
           }
         }
+#ifdef SIM_RAMP_HIGH_OVERRIDE
+        // ramp study (hakea sim/ramp-study): force the high rpm ramp
+        // limit regardless of the eeprom max_ramp clamp above
+        max_ramp_high_rpm = SIM_RAMP_HIGH_OVERRIDE;
+#endif
         
         if (motor_kv <= 20) {
             low_rpm_throttle_limit = 0;
@@ -1513,12 +1519,19 @@ void tenKhzRoutine()
              duty_cycle = last_duty_cycle;
             }
 
+#ifdef HAKEA_PROFILE
+        hakea_profile_tick(armed && running && input > 47 && zero_crosses > 1000);
+#endif
         if ((armed && running) && input > 47) {
           if(zero_throttle_brake_active){
             zero_throttle_brake_active = 0;
             temp_comp_pwm = eepromBuffer.comp_pwm;
           }else{
+#ifdef HAKEA_PROFILE
+            adjusted_duty_cycle = ((hakea_profile_apply(duty_cycle, duty_cycle_maximum) * tim1_arr) / 2000) + 1;
+#else
             adjusted_duty_cycle = ((duty_cycle * tim1_arr) / 2000) + 1;
+#endif
         }
         } else {
           if(running && input < 47){ // brake on zero throttle behavior while motor is still rotating
